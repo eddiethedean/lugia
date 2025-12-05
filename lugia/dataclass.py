@@ -1,9 +1,18 @@
-"""Python dataclass schema and data conversions."""
+"""Python dataclass schema and data conversions.
+
+This module provides functions to convert various schema types to Python dataclasses.
+"""
 
 import dataclasses
 from typing import Any, Optional, Union
 
 from lugia.exceptions import MissingDependencyError
+from lugia.type_converters import (
+    pandas_type_to_python,
+    polars_type_to_python,
+    pyspark_type_to_python,
+    sqlalchemy_type_to_python,
+)
 from lugia.utils import (
     is_dataclass,
     is_pydantic_instance,
@@ -16,11 +25,34 @@ def to_dataclass(source: Any) -> Union[type, Any]:
     """
     Convert a schema or data object to Python dataclass.
 
+    Supports conversion from:
+    - Pydantic models and instances
+    - TypedDict classes
+    - PySpark StructType
+    - Polars Schema and DataFrame
+    - Pandas DataFrame
+    - SQLModel classes (Pydantic-based)
+    - SQLAlchemy Table and model classes
+
     Args:
         source: Source schema (class) or data (instance)
 
     Returns:
         Dataclass class or instance
+
+    Raises:
+        MissingDependencyError: If required dependencies are not installed
+        ValueError: If the source type cannot be converted
+
+    Examples:
+        >>> import dataclasses
+        >>> @dataclasses.dataclass
+        ... class User:
+        ...     name: str
+        ...     age: int
+        >>> # Already a dataclass, returns as-is
+        >>> to_dataclass(User) is User
+        True
     """
     # If already a dataclass, return as-is
     if is_dataclass(source):
@@ -87,21 +119,55 @@ def to_dataclass(source: Any) -> Union[type, Any]:
 
 
 def _pydantic_to_dataclass(source: Any) -> Union[type, Any]:
-    """Convert Pydantic model to dataclass."""
+    """Convert Pydantic model to dataclass.
+
+    Args:
+        source: A Pydantic model class or instance
+
+    Returns:
+        A dataclass class or instance
+    """
     try:
         from pydantic import BaseModel
     except ImportError:
         raise MissingDependencyError("pydantic", "Pydantic to dataclass conversion") from None
 
+    # Handle Pydantic v1 and v2 compatibility
+    def get_fields(model: type[BaseModel]) -> dict[str, Any]:
+        if hasattr(model, "model_fields"):
+            return model.model_fields  # Pydantic v2
+        else:
+            return model.__fields__  # Pydantic v1
+
+    def dump_instance(instance: BaseModel) -> dict[str, Any]:
+        if hasattr(instance, "model_dump"):
+            return instance.model_dump()  # Pydantic v2
+        else:
+            return instance.dict()  # Pydantic v1
+
     if isinstance(source, type) and issubclass(source, BaseModel):
         # Convert model class
         fields = []
-        for field_name, field_info in source.model_fields.items():
-            field_type = field_info.annotation
-            default = field_info.default if field_info.default is not ... else dataclasses.MISSING
+        model_fields = get_fields(source)
+        for field_name, field_info in model_fields.items():
+            # Handle both v1 and v2 field info
+            if hasattr(field_info, "annotation"):
+                field_type = field_info.annotation
+            else:
+                field_type = field_info.type_  # v1
+
+            if hasattr(field_info, "default"):
+                default = (
+                    field_info.default if field_info.default is not ... else dataclasses.MISSING
+                )
+            else:
+                default = (
+                    field_info.default if field_info.default is not ... else dataclasses.MISSING
+                )
+
             default_factory = (
                 field_info.default_factory
-                if hasattr(field_info, "default_factory")
+                if hasattr(field_info, "default_factory") and field_info.default_factory is not ...
                 else dataclasses.MISSING
             )
 
@@ -122,11 +188,18 @@ def _pydantic_to_dataclass(source: Any) -> Union[type, Any]:
     else:
         # Convert instance
         dc_class = _pydantic_to_dataclass(type(source))
-        return dc_class(**source.model_dump())
+        return dc_class(**dump_instance(source))
 
 
 def _typeddict_to_dataclass(td_class: type) -> type:
-    """Convert TypedDict to dataclass."""
+    """Convert TypedDict to dataclass.
+
+    Args:
+        td_class: A TypedDict class
+
+    Returns:
+        A dataclass class
+    """
     from typing import get_type_hints
 
     annotations = get_type_hints(td_class)
@@ -136,12 +209,18 @@ def _typeddict_to_dataclass(td_class: type) -> type:
 
 
 def _pyspark_to_dataclass(struct_type) -> type:
-    """Convert PySpark StructType to dataclass."""
+    """Convert PySpark StructType to dataclass.
 
+    Args:
+        struct_type: A PySpark StructType instance
+
+    Returns:
+        A dataclass class
+    """
     fields = []
 
     for field in struct_type.fields:
-        field_type = _pyspark_type_to_python(field.dataType)
+        field_type = pyspark_type_to_python(field.dataType)
         if field.nullable:
             field_type = Optional[field_type]
         fields.append((field.name, field_type))
@@ -149,98 +228,38 @@ def _pyspark_to_dataclass(struct_type) -> type:
     return dataclasses.make_dataclass("PysparkDataclass", fields)
 
 
-def _pyspark_type_to_python(spark_type):
-    """Convert PySpark type to Python type."""
-    from datetime import date, datetime
-    from typing import Any
-
-    from pyspark.sql.types import (
-        ArrayType,
-        BooleanType,
-        DateType,
-        DoubleType,
-        FloatType,
-        IntegerType,
-        LongType,
-        MapType,
-        StringType,
-        TimestampType,
-    )
-
-    if isinstance(spark_type, StringType):
-        return str
-    elif isinstance(spark_type, (IntegerType, LongType)):
-        return int
-    elif isinstance(spark_type, (FloatType, DoubleType)):
-        return float
-    elif isinstance(spark_type, BooleanType):
-        return bool
-    elif isinstance(spark_type, DateType):
-        return date
-    elif isinstance(spark_type, TimestampType):
-        return datetime
-    elif isinstance(spark_type, ArrayType):
-        element_type = _pyspark_type_to_python(spark_type.elementType)
-        return list[element_type]
-    elif isinstance(spark_type, MapType):
-        key_type = _pyspark_type_to_python(spark_type.keyType)
-        value_type = _pyspark_type_to_python(spark_type.valueType)
-        return dict[key_type, value_type]
-    else:
-        return Any
-
-
 def _polars_to_dataclass(schema) -> type:
-    """Convert Polars Schema to dataclass."""
+    """Convert Polars Schema to dataclass.
 
+    Args:
+        schema: A Polars Schema instance
+
+    Returns:
+        A dataclass class
+    """
     fields = []
 
     for name, dtype in schema.items():
-        python_type = _polars_type_to_python(dtype)
+        python_type = polars_type_to_python(dtype)
         fields.append((name, python_type))
 
     return dataclasses.make_dataclass("PolarsDataclass", fields)
 
 
-def _polars_type_to_python(dtype):
-    """Convert Polars dtype to Python type."""
-    from typing import Any
-
-    import polars as pl
-
-    if dtype == pl.Utf8 or dtype == pl.String:
-        return str
-    elif dtype == pl.Int64 or dtype == pl.Int32:
-        return int
-    elif dtype == pl.Float64 or dtype == pl.Float32:
-        return float
-    elif dtype == pl.Boolean:
-        return bool
-    elif dtype == pl.Date:
-        from datetime import date
-
-        return date
-    elif dtype == pl.Datetime:
-        from datetime import datetime
-
-        return datetime
-    elif isinstance(dtype, pl.List):
-        element_type = _polars_type_to_python(dtype.inner)
-        return list[element_type]
-    elif isinstance(dtype, pl.Struct):
-        return dict[str, Any]
-    else:
-        return Any
-
-
 def _pandas_to_dataclass(df) -> type:
-    """Convert Pandas DataFrame to dataclass."""
+    """Convert Pandas DataFrame to dataclass.
 
+    Args:
+        df: A Pandas DataFrame
+
+    Returns:
+        A dataclass class
+    """
     fields = []
 
     for col in df.columns:
         dtype = df[col].dtype
-        python_type = _pandas_type_to_python(dtype)
+        python_type = pandas_type_to_python(dtype)
         if df[col].isna().any():
             python_type = Optional[python_type]
         fields.append((col, python_type))
@@ -248,62 +267,21 @@ def _pandas_to_dataclass(df) -> type:
     return dataclasses.make_dataclass("PandasDataclass", fields)
 
 
-def _pandas_type_to_python(dtype):
-    """Convert Pandas dtype to Python type."""
-    from datetime import datetime
-    from typing import Any
-
-    import pandas as pd
-
-    if pd.api.types.is_integer_dtype(dtype):
-        return int
-    elif pd.api.types.is_float_dtype(dtype):
-        return float
-    elif pd.api.types.is_bool_dtype(dtype):
-        return bool
-    elif pd.api.types.is_datetime64_any_dtype(dtype):
-        return datetime
-    elif pd.api.types.is_object_dtype(dtype):
-        return Any
-    else:
-        return str
-
-
 def _sqlalchemy_to_dataclass(table) -> type:
-    """Convert SQLAlchemy Table to dataclass."""
+    """Convert SQLAlchemy Table to dataclass.
 
+    Args:
+        table: A SQLAlchemy Table instance
+
+    Returns:
+        A dataclass class
+    """
     fields = []
 
     for column in table.columns:
-        python_type = _sqlalchemy_type_to_python(column.type)
+        python_type = sqlalchemy_type_to_python(column.type)
         if column.nullable:
             python_type = Optional[python_type]
         fields.append((column.name, python_type))
 
     return dataclasses.make_dataclass(f"{table.name}Dataclass", fields)
-
-
-def _sqlalchemy_type_to_python(sa_type):
-    """Convert SQLAlchemy type to Python type."""
-    from datetime import date, datetime
-    from typing import Any
-
-    from sqlalchemy import Boolean, Date, DateTime, Float, Integer, String, Text
-
-    try:
-        return sa_type.python_type
-    except AttributeError:
-        if isinstance(sa_type, (String, Text)):
-            return str
-        elif isinstance(sa_type, Integer):
-            return int
-        elif isinstance(sa_type, Float):
-            return float
-        elif isinstance(sa_type, Boolean):
-            return bool
-        elif isinstance(sa_type, Date):
-            return date
-        elif isinstance(sa_type, DateTime):
-            return datetime
-        else:
-            return Any

@@ -1,8 +1,9 @@
 """Polars DataFrame and Schema conversions."""
 
-from typing import Any, Optional, Union
+from typing import Any, Union
 
 from lugia.exceptions import MissingDependencyError
+from lugia.type_converters import python_type_to_polars
 from lugia.utils import (
     is_dataclass,
     is_pydantic_instance,
@@ -95,8 +96,16 @@ def _pydantic_to_polars(source: Any) -> Union[pl.DataFrame, pl.Schema]:
     if isinstance(source, type) and issubclass(source, BaseModel):
         # Schema only - return Schema
         schema_dict = {}
-        for field_name, field_info in source.model_fields.items():
-            polars_type = _python_type_to_polars(field_info.annotation)
+        # Handle Pydantic v1 and v2 compatibility
+        model_fields = source.model_fields if hasattr(source, "model_fields") else source.__fields__
+
+        for field_name, field_info in model_fields.items():
+            # Handle both v1 and v2 field info
+            if hasattr(field_info, "annotation"):
+                field_type = field_info.annotation  # v2
+            else:
+                field_type = field_info.type_  # v1
+            polars_type = python_type_to_polars(field_type)
             schema_dict[field_name] = polars_type
         return pl.Schema(schema_dict)
     else:
@@ -116,7 +125,7 @@ def _dataclass_to_polars(source: Any) -> Union[pl.DataFrame, pl.Schema]:
         hints = get_type_hints(source)
         for field in dataclasses.fields(source):
             field_type = hints.get(field.name, Any)
-            polars_type = _python_type_to_polars(field_type)
+            polars_type = python_type_to_polars(field_type)
             schema_dict[field.name] = polars_type
         return pl.Schema(schema_dict)
     else:
@@ -210,44 +219,7 @@ def _pandas_to_polars(pandas_df) -> pl.DataFrame:
     return pl.from_pandas(pandas_df)
 
 
-def _python_type_to_polars(python_type) -> pl.DataType:
-    """Convert Python type hint to Polars type."""
-    from datetime import date, datetime
-    from typing import Union, get_args, get_origin
-
-    origin = get_origin(python_type)
-
-    if origin is Optional or (origin is Union and type(None) in get_args(python_type)):
-        # Handle Optional types
-        args = get_args(python_type)
-        non_none_args = [arg for arg in args if arg is not type(None)]
-        if non_none_args:
-            return _python_type_to_polars(non_none_args[0])
-        return pl.Utf8
-
-    if origin is list:
-        # Handle List types
-        args = get_args(python_type)
-        if args:
-            element_type = _python_type_to_polars(args[0])
-            return pl.List(element_type)
-        return pl.List(pl.Utf8)
-
-    # Handle base types
-    if python_type is str:
-        return pl.Utf8
-    elif python_type is int:
-        return pl.Int64
-    elif python_type is float:
-        return pl.Float64
-    elif python_type is bool:
-        return pl.Boolean
-    elif python_type is date:
-        return pl.Date
-    elif python_type is datetime:
-        return pl.Datetime
-    else:
-        return pl.Utf8  # Default to string
+# Use centralized python_type_to_polars from type_converters module
 
 
 def from_polars(polars_obj: Union[pl.DataFrame, pl.Schema], target_type: str = "pydantic") -> Any:

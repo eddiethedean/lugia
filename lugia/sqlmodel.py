@@ -1,8 +1,18 @@
-"""SQLModel model conversions."""
+"""SQLModel model conversions.
+
+This module provides functions to convert various schema types to SQLModel classes.
+SQLModel is a library that combines SQLAlchemy and Pydantic.
+"""
 
 from typing import Any, Optional
 
 from lugia.exceptions import MissingDependencyError
+from lugia.type_converters import (
+    pandas_type_to_python,
+    polars_type_to_python,
+    pyspark_type_to_python,
+    sqlalchemy_type_to_python,
+)
 from lugia.utils import (
     is_dataclass,
     is_pydantic_instance,
@@ -32,11 +42,33 @@ def to_sqlmodel(source: Any) -> type[SQLModel]:
     """
     Convert a schema object to SQLModel model class.
 
+    Supports conversion from:
+    - Pydantic models and instances
+    - Dataclass classes
+    - TypedDict classes
+    - PySpark StructType
+    - Polars Schema
+    - Pandas DataFrame
+    - SQLAlchemy Table and model classes
+
     Args:
-        source: Source schema
+        source: Source schema (class) or instance
 
     Returns:
         SQLModel model class
+
+    Raises:
+        MissingDependencyError: If SQLModel is not installed
+        ValueError: If the source type cannot be converted
+
+    Examples:
+        >>> from sqlmodel import SQLModel
+        >>> class User(SQLModel):
+        ...     name: str
+        ...     age: int
+        >>> # Already SQLModel, returns as-is
+        >>> to_sqlmodel(User) is User
+        True
     """
     _check_sqlmodel()
 
@@ -98,7 +130,14 @@ def to_sqlmodel(source: Any) -> type[SQLModel]:
 
 
 def _pydantic_to_sqlmodel(source: Any) -> type[SQLModel]:
-    """Convert Pydantic model to SQLModel."""
+    """Convert Pydantic model to SQLModel.
+
+    Args:
+        source: A Pydantic model class or instance
+
+    Returns:
+        A SQLModel class
+    """
     try:
         from pydantic import BaseModel
     except ImportError:
@@ -106,13 +145,25 @@ def _pydantic_to_sqlmodel(source: Any) -> type[SQLModel]:
 
     model = source if isinstance(source, type) and issubclass(source, BaseModel) else type(source)
 
+    # Handle Pydantic v1 and v2 compatibility
+    model_fields = model.model_fields if hasattr(model, "model_fields") else model.__fields__
+
     # SQLModel is based on Pydantic, so we can create a SQLModel subclass
     # that inherits from the Pydantic model's fields
     annotations = {}
     fields = {}
-    for field_name, field_info in model.model_fields.items():
-        field_type = field_info.annotation
-        default = field_info.default if field_info.default is not ... else None
+    for field_name, field_info in model_fields.items():
+        # Handle both v1 and v2 field info
+        if hasattr(field_info, "annotation"):
+            field_type = field_info.annotation  # v2
+        else:
+            field_type = field_info.type_  # v1
+
+        if hasattr(field_info, "default"):
+            default = field_info.default if field_info.default is not ... else None
+        else:
+            default = None
+
         annotations[field_name] = field_type
         if default is not None:
             fields[field_name] = Field(default=default)
@@ -126,7 +177,14 @@ def _pydantic_to_sqlmodel(source: Any) -> type[SQLModel]:
 
 
 def _dataclass_to_sqlmodel(source: type) -> type[SQLModel]:
-    """Convert dataclass to SQLModel."""
+    """Convert dataclass to SQLModel.
+
+    Args:
+        source: A dataclass class
+
+    Returns:
+        A SQLModel class
+    """
     import dataclasses
     from typing import get_type_hints
 
@@ -152,7 +210,14 @@ def _dataclass_to_sqlmodel(source: type) -> type[SQLModel]:
 
 
 def _typeddict_to_sqlmodel(td_class: type) -> type[SQLModel]:
-    """Convert TypedDict to SQLModel."""
+    """Convert TypedDict to SQLModel.
+
+    Args:
+        td_class: A TypedDict class
+
+    Returns:
+        A SQLModel class
+    """
     from typing import get_type_hints
 
     hints = get_type_hints(td_class)
@@ -166,12 +231,18 @@ def _typeddict_to_sqlmodel(td_class: type) -> type[SQLModel]:
 
 
 def _pyspark_to_sqlmodel(struct_type) -> type[SQLModel]:
-    """Convert PySpark StructType to SQLModel."""
+    """Convert PySpark StructType to SQLModel.
 
+    Args:
+        struct_type: A PySpark StructType instance
+
+    Returns:
+        A SQLModel class
+    """
     fields = {}
 
     for field in struct_type.fields:
-        field_type = _pyspark_type_to_python(field.dataType)
+        field_type = pyspark_type_to_python(field.dataType)
         if field.nullable:
             field_type = Optional[field_type]
         fields[field.name] = (field_type, Field())
@@ -179,84 +250,38 @@ def _pyspark_to_sqlmodel(struct_type) -> type[SQLModel]:
     return type("PysparkSQLModel", (SQLModel,), fields)
 
 
-def _pyspark_type_to_python(spark_type):
-    """Convert PySpark type to Python type."""
-    from datetime import date, datetime
-    from typing import Any
-
-    from pyspark.sql.types import (
-        BooleanType,
-        DateType,
-        DoubleType,
-        FloatType,
-        IntegerType,
-        LongType,
-        StringType,
-        TimestampType,
-    )
-
-    if isinstance(spark_type, StringType):
-        return str
-    elif isinstance(spark_type, (IntegerType, LongType)):
-        return int
-    elif isinstance(spark_type, (FloatType, DoubleType)):
-        return float
-    elif isinstance(spark_type, BooleanType):
-        return bool
-    elif isinstance(spark_type, DateType):
-        return date
-    elif isinstance(spark_type, TimestampType):
-        return datetime
-    else:
-        return Any
-
-
 def _polars_to_sqlmodel(schema) -> type[SQLModel]:
-    """Convert Polars Schema to SQLModel."""
+    """Convert Polars Schema to SQLModel.
 
+    Args:
+        schema: A Polars Schema instance
+
+    Returns:
+        A SQLModel class
+    """
     fields = {}
 
     for name, dtype in schema.items():
-        python_type = _polars_type_to_python(dtype)
+        python_type = polars_type_to_python(dtype)
         fields[name] = (python_type, Field())
 
     return type("PolarsSQLModel", (SQLModel,), fields)
 
 
-def _polars_type_to_python(dtype):
-    """Convert Polars dtype to Python type."""
-    from typing import Any
-
-    import polars as pl
-
-    if dtype == pl.Utf8 or dtype == pl.String:
-        return str
-    elif dtype == pl.Int64 or dtype == pl.Int32:
-        return int
-    elif dtype == pl.Float64 or dtype == pl.Float32:
-        return float
-    elif dtype == pl.Boolean:
-        return bool
-    elif dtype == pl.Date:
-        from datetime import date
-
-        return date
-    elif dtype == pl.Datetime:
-        from datetime import datetime
-
-        return datetime
-    else:
-        return Any
-
-
 def _pandas_to_sqlmodel(df) -> type[SQLModel]:
-    """Convert Pandas DataFrame to SQLModel."""
+    """Convert Pandas DataFrame to SQLModel.
 
+    Args:
+        df: A Pandas DataFrame
+
+    Returns:
+        A SQLModel class
+    """
     fields = {}
 
     for col in df.columns:
         dtype = df[col].dtype
-        python_type = _pandas_type_to_python(dtype)
+        python_type = pandas_type_to_python(dtype)
         if df[col].isna().any():
             python_type = Optional[python_type]
         fields[col] = (python_type, Field())
@@ -264,66 +289,24 @@ def _pandas_to_sqlmodel(df) -> type[SQLModel]:
     return type("PandasSQLModel", (SQLModel,), fields)
 
 
-def _pandas_type_to_python(dtype):
-    """Convert Pandas dtype to Python type."""
-    from typing import Any
-
-    import pandas as pd
-
-    if pd.api.types.is_integer_dtype(dtype):
-        return int
-    elif pd.api.types.is_float_dtype(dtype):
-        return float
-    elif pd.api.types.is_bool_dtype(dtype):
-        return bool
-    elif pd.api.types.is_datetime64_any_dtype(dtype):
-        from datetime import datetime
-
-        return datetime
-    elif pd.api.types.is_object_dtype(dtype):
-        return Any
-    else:
-        return str
-
-
 def _sqlalchemy_to_sqlmodel(table) -> type[SQLModel]:
-    """Convert SQLAlchemy Table to SQLModel."""
+    """Convert SQLAlchemy Table to SQLModel.
 
+    Args:
+        table: A SQLAlchemy Table instance
+
+    Returns:
+        A SQLModel class
+    """
     fields = {}
 
     for column in table.columns:
-        python_type = _sqlalchemy_type_to_python(column.type)
+        python_type = sqlalchemy_type_to_python(column.type)
         if column.nullable:
             python_type = Optional[python_type]
         fields[column.name] = (python_type, Field())
 
     return type(f"{table.name}SQLModel", (SQLModel,), fields)
-
-
-def _sqlalchemy_type_to_python(sa_type):
-    """Convert SQLAlchemy type to Python type."""
-    from datetime import date, datetime
-    from typing import Any
-
-    from sqlalchemy import Boolean, Date, DateTime, Float, Integer, String, Text
-
-    try:
-        return sa_type.python_type
-    except AttributeError:
-        if isinstance(sa_type, (String, Text)):
-            return str
-        elif isinstance(sa_type, Integer):
-            return int
-        elif isinstance(sa_type, Float):
-            return float
-        elif isinstance(sa_type, Boolean):
-            return bool
-        elif isinstance(sa_type, Date):
-            return date
-        elif isinstance(sa_type, DateTime):
-            return datetime
-        else:
-            return Any
 
 
 def from_sqlmodel(sqlmodel_class: type[SQLModel], target_type: str = "pydantic") -> Any:

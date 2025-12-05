@@ -6,7 +6,7 @@ including PySpark, Polars, Pandas, Pydantic, dataclass, TypedDict, SQLModel,
 and SQLAlchemy. All dependencies are optional for maximum flexibility.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __author__ = "Odos Matthews"
 __email__ = "odosmatthews@gmail.com"
 

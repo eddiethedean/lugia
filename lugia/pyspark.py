@@ -36,6 +36,7 @@ else:
     MapType = None  # type: ignore
 
 from lugia.exceptions import MissingDependencyError
+from lugia.type_converters import python_type_to_pyspark
 from lugia.utils import (
     is_dataclass,
     is_pydantic_instance,
@@ -157,8 +158,16 @@ def _pydantic_to_pyspark(
     if isinstance(source, type) and issubclass(source, BaseModel):
         # Schema only - return StructType
         fields = []
-        for field_name, field_info in source.model_fields.items():
-            spark_type = _python_type_to_pyspark(field_info.annotation)
+        # Handle Pydantic v1 and v2 compatibility
+        model_fields = source.model_fields if hasattr(source, "model_fields") else source.__fields__
+
+        for field_name, field_info in model_fields.items():
+            # Handle both v1 and v2 field info
+            if hasattr(field_info, "annotation"):
+                field_type = field_info.annotation  # v2
+            else:
+                field_type = field_info.type_  # v1
+            spark_type = python_type_to_pyspark(field_type)
             nullable = True  # Pydantic fields can be optional
             fields.append(StructField(field_name, spark_type, nullable=nullable))
         return StructType(fields)
@@ -184,7 +193,7 @@ def _dataclass_to_pyspark(
         hints = get_type_hints(source)
         for field in dataclasses.fields(source):
             field_type = hints.get(field.name, Any)
-            spark_type = _python_type_to_pyspark(field_type)
+            spark_type = python_type_to_pyspark(field_type)
             nullable = (
                 field.default != dataclasses.MISSING or field.default_factory != dataclasses.MISSING
             )
@@ -284,53 +293,7 @@ def _pandas_to_pyspark(pandas_df: Any, spark_session: SparkSession) -> SparkData
     return spark_session.createDataFrame(data)  # type: ignore
 
 
-def _python_type_to_pyspark(python_type: Any) -> Any:
-    """Convert Python type hint to PySpark type."""
-    from datetime import date, datetime
-    from typing import Union, get_args, get_origin
-
-    origin = get_origin(python_type)
-
-    if origin is Optional or (origin is Union and type(None) in get_args(python_type)):
-        # Handle Optional types - use the non-None type
-        args = get_args(python_type)
-        non_none_args = [arg for arg in args if arg is not type(None)]
-        if non_none_args:
-            return _python_type_to_pyspark(non_none_args[0])
-        return StringType()
-
-    if origin is list:
-        # Handle List types
-        args = get_args(python_type)
-        if args:
-            element_type = _python_type_to_pyspark(args[0])
-            return ArrayType(element_type)
-        return ArrayType(StringType())
-
-    if origin is dict:
-        # Handle Dict types
-        args = get_args(python_type)
-        if len(args) >= 2:
-            key_type = _python_type_to_pyspark(args[0])
-            value_type = _python_type_to_pyspark(args[1])
-            return MapType(key_type, value_type)
-        return MapType(StringType(), StringType())
-
-    # Handle base types
-    if python_type is str:
-        return StringType()
-    elif python_type is int:
-        return LongType()
-    elif python_type is float:
-        return DoubleType()
-    elif python_type is bool:
-        return BooleanType()
-    elif python_type is date:
-        return DateType()
-    elif python_type is datetime:
-        return TimestampType()
-    else:
-        return StringType()  # Default to string
+# Use centralized python_type_to_pyspark from type_converters module
 
 
 def from_pyspark(

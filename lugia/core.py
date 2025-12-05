@@ -15,8 +15,24 @@ def detect_type(obj: Any) -> str:
     """
     Detect the type of a schema or data object.
 
-    Returns one of: 'pydantic', 'dataclass', 'typedict', 'pyspark',
-    'polars', 'pandas', 'sqlmodel', 'sqlalchemy', 'unknown'
+    This function attempts to identify the type of a given object by checking
+    against known schema types. It supports both class types and instances.
+
+    Args:
+        obj: The object to detect the type of (can be a class or instance)
+
+    Returns:
+        A string representing the detected type. One of: 'pydantic', 'dataclass',
+        'typedict', 'pyspark', 'polars', 'pandas', 'sqlmodel', 'sqlalchemy', 'unknown'
+
+    Examples:
+        >>> from pydantic import BaseModel
+        >>> class User(BaseModel):
+        ...     name: str
+        >>> detect_type(User)
+        'pydantic'
+        >>> detect_type(User(name="John"))
+        'pydantic'
     """
     # Check for Pydantic
     try:
@@ -92,13 +108,31 @@ def convert(source: Any, target: Optional[str] = None, target_type: Optional[typ
     """
     Convert a schema or data object to another format.
 
+    This is the unified conversion function that automatically detects the source
+    type and converts it to the specified target format. Either 'target' or
+    'target_type' must be provided.
+
     Args:
         source: The source schema or data to convert
-        target: Target format name (e.g., 'pyspark', 'polars', 'pydantic')
+        target: Target format name (e.g., 'pyspark', 'polars', 'pydantic', 'dataclass')
         target_type: Target type class (alternative to target string)
 
     Returns:
         Converted schema or data object
+
+    Raises:
+        ConversionError: If the source type cannot be detected or conversion fails
+        ValueError: If neither 'target' nor 'target_type' is provided
+
+    Examples:
+        >>> from pydantic import BaseModel
+        >>> class User(BaseModel):
+        ...     name: str
+        ...     age: int
+        >>> # Convert to dataclass
+        >>> UserDC = convert(User, target="dataclass")
+        >>> # Convert back to Pydantic
+        >>> UserPydantic = convert(UserDC, target="pydantic")
     """
     source_type = detect_type(source)
 

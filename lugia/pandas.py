@@ -96,7 +96,11 @@ def _pydantic_to_pandas(source: Any) -> pd.DataFrame:
 
     if isinstance(source, type) and issubclass(source, BaseModel):
         # Schema only - return empty DataFrame with correct columns
-        fields = list(source.model_fields.keys())
+        # Handle Pydantic v1 and v2 compatibility
+        if hasattr(source, "model_fields"):
+            fields = list(source.model_fields.keys())  # Pydantic v2
+        else:
+            fields = list(source.__fields__.keys())  # Pydantic v1
         return pd.DataFrame(columns=fields)
     else:
         # Instance - convert to dict and create DataFrame

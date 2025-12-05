@@ -1,8 +1,18 @@
-"""Pydantic schema and data conversions."""
+"""Pydantic schema and data conversions.
+
+This module provides functions to convert various schema types to Pydantic models.
+It supports both Pydantic v1 and v2 with automatic compatibility detection.
+"""
 
 from typing import Any, Optional, Union
 
 from lugia.exceptions import MissingDependencyError
+from lugia.type_converters import (
+    pandas_type_to_python,
+    polars_type_to_python,
+    pyspark_type_to_python,
+    sqlalchemy_type_to_python,
+)
 from lugia.utils import (
     get_annotations,
     is_dataclass,
@@ -16,8 +26,30 @@ try:
     from pydantic.fields import FieldInfo
 
     PYDANTIC_AVAILABLE = True
+    PYDANTIC_V2 = False
+    try:
+        # Check if Pydantic v2 is available
+        import pydantic
+
+        # Check for v2 indicators without triggering deprecation warnings
+        # Pydantic v2 has a v1 compatibility module
+        if hasattr(pydantic, "v1"):
+            PYDANTIC_V2 = True
+        else:
+            # Check version number if available
+            if hasattr(pydantic, "__version__"):
+                version = pydantic.__version__
+                PYDANTIC_V2 = version.startswith("2.")
+            else:
+                # Fallback: create a test model and check for model_fields
+                # This avoids accessing __fields__ directly
+                test_model = type("_TestModel", (BaseModel,), {})
+                PYDANTIC_V2 = hasattr(test_model, "model_fields")
+    except Exception:
+        pass
 except ImportError:
     PYDANTIC_AVAILABLE = False
+    PYDANTIC_V2 = False
     BaseModel = None  # type: ignore
     create_model = None  # type: ignore
     FieldInfo = None  # type: ignore
@@ -29,15 +61,67 @@ def _check_pydantic():
         raise MissingDependencyError("pydantic", "Pydantic conversions")
 
 
+def _get_pydantic_fields(model: type[BaseModel]) -> dict[str, Any]:
+    """Get model fields in a way compatible with both Pydantic v1 and v2.
+
+    Args:
+        model: A Pydantic BaseModel class
+
+    Returns:
+        Dictionary of field names to field info objects
+    """
+    if PYDANTIC_V2:
+        return model.model_fields  # type: ignore
+    else:
+        return model.__fields__  # type: ignore
+
+
+def _pydantic_dump(instance: BaseModel) -> dict[str, Any]:
+    """Dump a Pydantic instance to dict in a way compatible with both v1 and v2.
+
+    Args:
+        instance: A Pydantic model instance
+
+    Returns:
+        Dictionary representation of the instance
+    """
+    if PYDANTIC_V2:
+        return instance.model_dump()
+    else:
+        return instance.dict()
+
+
 def to_pydantic(source: Any) -> Union[type[BaseModel], BaseModel]:
     """
     Convert a schema or data object to Pydantic.
+
+    Supports conversion from:
+    - Dataclass classes and instances
+    - TypedDict classes
+    - PySpark StructType
+    - Polars Schema and DataFrame
+    - Pandas DataFrame
+    - SQLModel classes (already Pydantic-based)
+    - SQLAlchemy Table and model classes
 
     Args:
         source: Source schema (class) or data (instance)
 
     Returns:
         Pydantic model class or instance
+
+    Raises:
+        MissingDependencyError: If Pydantic is not installed
+        ValueError: If the source type cannot be converted
+
+    Examples:
+        >>> from pydantic import BaseModel
+        >>> class User(BaseModel):
+        ...     name: str
+        ...     age: int
+        >>> # Already Pydantic, returns as-is
+        >>> to_pydantic(User) is User
+        True
     """
     _check_pydantic()
 
@@ -106,7 +190,14 @@ def to_pydantic(source: Any) -> Union[type[BaseModel], BaseModel]:
 
 
 def _dataclass_to_pydantic(dc_class: type) -> type[BaseModel]:
-    """Convert a dataclass to Pydantic model."""
+    """Convert a dataclass to Pydantic model.
+
+    Args:
+        dc_class: A dataclass class
+
+    Returns:
+        A Pydantic model class
+    """
     import dataclasses
 
     fields = {}
@@ -133,7 +224,17 @@ def _dataclass_to_pydantic(dc_class: type) -> type[BaseModel]:
 
 
 def _typeddict_to_pydantic(td_class: type) -> type[BaseModel]:
-    """Convert a TypedDict to Pydantic model."""
+    """Convert a TypedDict to Pydantic model.
+
+    Args:
+        td_class: A TypedDict class
+
+    Returns:
+        A Pydantic model class
+
+    Note:
+        All TypedDict fields are treated as required unless they are Optional.
+    """
     annotations = get_annotations(td_class)
     fields = {}
 
@@ -146,12 +247,18 @@ def _typeddict_to_pydantic(td_class: type) -> type[BaseModel]:
 
 
 def _pyspark_to_pydantic(struct_type) -> type[BaseModel]:
-    """Convert PySpark StructType to Pydantic model."""
+    """Convert PySpark StructType to Pydantic model.
 
+    Args:
+        struct_type: A PySpark StructType instance
+
+    Returns:
+        A Pydantic model class
+    """
     fields = {}
 
     for field in struct_type.fields:
-        field_type = _pyspark_type_to_python(field.dataType)
+        field_type = pyspark_type_to_python(field.dataType)
         fields[field.name] = (
             field_type,
             ... if not field.nullable else Optional[field_type],
@@ -160,101 +267,40 @@ def _pyspark_to_pydantic(struct_type) -> type[BaseModel]:
     return create_model("PysparkModel", **fields)
 
 
-def _pyspark_type_to_python(spark_type):
-    """Convert PySpark type to Python type."""
-    from datetime import date, datetime
-    from typing import Any
-
-    from pyspark.sql.types import (
-        ArrayType,
-        BooleanType,
-        DateType,
-        DoubleType,
-        FloatType,
-        IntegerType,
-        LongType,
-        MapType,
-        StringType,
-        StructType,
-        TimestampType,
-    )
-
-    if isinstance(spark_type, StringType):
-        return str
-    elif isinstance(spark_type, (IntegerType, LongType)):
-        return int
-    elif isinstance(spark_type, (FloatType, DoubleType)):
-        return float
-    elif isinstance(spark_type, BooleanType):
-        return bool
-    elif isinstance(spark_type, DateType):
-        return date
-    elif isinstance(spark_type, TimestampType):
-        return datetime
-    elif isinstance(spark_type, ArrayType):
-        element_type = _pyspark_type_to_python(spark_type.elementType)
-        return list[element_type]
-    elif isinstance(spark_type, MapType):
-        key_type = _pyspark_type_to_python(spark_type.keyType)
-        value_type = _pyspark_type_to_python(spark_type.valueType)
-        return dict[key_type, value_type]
-    elif isinstance(spark_type, StructType):
-        # For nested structs, we'd need to create a nested model
-        return dict[str, Any]
-    else:
-        return Any
-
-
 def _polars_to_pydantic(schema) -> type[BaseModel]:
-    """Convert Polars Schema to Pydantic model."""
+    """Convert Polars Schema to Pydantic model.
 
+    Args:
+        schema: A Polars Schema instance
+
+    Returns:
+        A Pydantic model class
+    """
     fields = {}
 
     for name, dtype in schema.items():
-        python_type = _polars_type_to_python(dtype)
+        python_type = polars_type_to_python(dtype)
         fields[name] = (python_type, ...)
 
     return create_model("PolarsModel", **fields)
 
 
-def _polars_type_to_python(dtype):
-    """Convert Polars dtype to Python type."""
-    import polars as pl
-
-    if dtype == pl.Utf8 or dtype == pl.String:
-        return str
-    elif dtype == pl.Int64 or dtype == pl.Int32:
-        return int
-    elif dtype == pl.Float64 or dtype == pl.Float32:
-        return float
-    elif dtype == pl.Boolean:
-        return bool
-    elif dtype == pl.Date:
-        from datetime import date
-
-        return date
-    elif dtype == pl.Datetime:
-        from datetime import datetime
-
-        return datetime
-    elif isinstance(dtype, pl.List):
-        element_type = _polars_type_to_python(dtype.inner)
-        return list[element_type]
-    elif isinstance(dtype, pl.Struct):
-        return dict[str, Any]
-    else:
-        return Any
-
-
 def _pandas_to_pydantic(df) -> type[BaseModel]:
-    """Convert Pandas DataFrame to Pydantic model."""
+    """Convert Pandas DataFrame to Pydantic model.
+
+    Args:
+        df: A Pandas DataFrame
+
+    Returns:
+        A Pydantic model class
+    """
     from typing import Optional
 
     fields = {}
 
     for col in df.columns:
         dtype = df[col].dtype
-        python_type = _pandas_type_to_python(dtype)
+        python_type = pandas_type_to_python(dtype)
         # Check for nullable columns
         if df[col].isna().any():
             python_type = Optional[python_type]
@@ -263,63 +309,23 @@ def _pandas_to_pydantic(df) -> type[BaseModel]:
     return create_model("PandasModel", **fields)
 
 
-def _pandas_type_to_python(dtype):
-    """Convert Pandas dtype to Python type."""
-    from datetime import datetime
-
-    import pandas as pd
-
-    if pd.api.types.is_integer_dtype(dtype):
-        return int
-    elif pd.api.types.is_float_dtype(dtype):
-        return float
-    elif pd.api.types.is_bool_dtype(dtype):
-        return bool
-    elif pd.api.types.is_datetime64_any_dtype(dtype):
-        return datetime
-    elif pd.api.types.is_object_dtype(dtype):
-        return Any
-    else:
-        return str
-
-
 def _sqlalchemy_to_pydantic(table) -> type[BaseModel]:
-    """Convert SQLAlchemy Table to Pydantic model."""
+    """Convert SQLAlchemy Table to Pydantic model.
+
+    Args:
+        table: A SQLAlchemy Table instance
+
+    Returns:
+        A Pydantic model class
+    """
     from typing import Optional
 
     fields = {}
 
     for column in table.columns:
-        python_type = _sqlalchemy_type_to_python(column.type)
+        python_type = sqlalchemy_type_to_python(column.type)
         if column.nullable:
             python_type = Optional[python_type]
         fields[column.name] = (python_type, ...)
 
     return create_model(f"{table.name}Model", **fields)
-
-
-def _sqlalchemy_type_to_python(sa_type):
-    """Convert SQLAlchemy type to Python type."""
-    from datetime import date, datetime
-
-    from sqlalchemy import Boolean, Date, DateTime, Float, Integer, String, Text
-
-    # Get the Python type from SQLAlchemy type
-    try:
-        return sa_type.python_type
-    except AttributeError:
-        # Fallback for types without python_type
-        if isinstance(sa_type, (String, Text)):
-            return str
-        elif isinstance(sa_type, Integer):
-            return int
-        elif isinstance(sa_type, Float):
-            return float
-        elif isinstance(sa_type, Boolean):
-            return bool
-        elif isinstance(sa_type, Date):
-            return date
-        elif isinstance(sa_type, DateTime):
-            return datetime
-        else:
-            return Any

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lugia"
-version = "0.1.0"
+version = "0.1.1"
 description = "Universal schema converter for Python data types with optional dependencies"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -28,14 +28,14 @@ classifiers = [
 pyspark = ["pyspark>=3.5.0,<4.0.0"]
 polars = ["polars>=0.18.0"]
 pandas = ["pandas>=1.3.0"]
-pydantic = ["pydantic>=1.10.0"]
+pydantic = ["pydantic>=1.10.0,<3.0.0"]
 sqlmodel = ["sqlmodel>=0.0.8"]
 sqlalchemy = ["sqlalchemy>=1.4.0"]
 all = [
     "pyspark>=3.5.0,<4.0.0",
     "polars>=0.18.0",
     "pandas>=1.3.0",
-    "pydantic>=1.10.0",
+    "pydantic>=1.10.0,<3.0.0",
     "sqlmodel>=0.0.8",
     "sqlalchemy>=1.4.0",
 ]
@@ -106,7 +106,10 @@ no_implicit_optional = true
 ignore_missing_imports = true
 allow_redefinition = true
 show_error_codes = true
+strict_optional = true
 
+# Note: We keep ignore_errors for converter modules due to optional dependencies
+# but we should gradually improve type hints in these modules
 [[tool.mypy.overrides]]
 module = [
     "lugia.typedict",
@@ -118,6 +121,7 @@ module = [
     "lugia.sqlalchemy",
     "lugia.sqlmodel",
 ]
+# Keep ignore_errors for now, but aim to remove this as type hints improve
 ignore_errors = true
 
 [tool.pytest.ini_options]
